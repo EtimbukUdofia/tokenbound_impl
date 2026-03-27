@@ -18,6 +18,11 @@ pub enum Error {
     InvalidTicketCount = 8,
     CounterOverflow = 9,
     FactoryNotInitialized = 10,
+    EventNotCanceled = 11,
+    RefundAlreadyClaimed = 12,
+    NotABuyer = 13,
+    EventSoldOut = 14,
+    TicketsBelowSold = 15,
 }
 
 // Storage keys
@@ -197,18 +202,18 @@ impl EventManager {
 
     /// Claim refund for a canceled event (pull model)
     /// Only works for canceled events, prevents double-refund claims
-    pub fn claim_refund(env: Env, claimer: Address, event_id: u32) {
+    pub fn claim_refund(env: Env, claimer: Address, event_id: u32) -> Result<(), Error> {
         claimer.require_auth();
 
         let event: Event = env
             .storage()
             .persistent()
             .get(&DataKey::Event(event_id))
-            .unwrap_or_else(|| panic!("Event not found"));
+            .ok_or(Error::EventNotFound)?;
 
         // Event must be canceled
         if !event.is_canceled {
-            panic!("Event is not canceled");
+            return Err(Error::EventNotCanceled);
         }
 
         // Check if this claimer already claimed refund
@@ -217,7 +222,7 @@ impl EventManager {
             .persistent()
             .has(&DataKey::RefundClaimed(event_id, claimer.clone()))
         {
-            panic!("Refund already claimed");
+            return Err(Error::RefundAlreadyClaimed);
         }
 
         // Verify claimer is in the buyers list
@@ -236,7 +241,7 @@ impl EventManager {
         }
 
         if !found {
-            panic!("Claimer did not purchase a ticket for this event");
+            return Err(Error::NotABuyer);
         }
 
         // Mark refund as claimed (prevent double-refund)
@@ -255,6 +260,8 @@ impl EventManager {
             (Symbol::new(&env, "refund_claimed"),),
             (event_id, claimer, event.ticket_price),
         );
+
+        Ok(())
     }
 
     /// Update event details. Only the organizer can update. Cannot update a canceled event.
@@ -267,19 +274,19 @@ impl EventManager {
         total_tickets: Option<u128>,
         start_date: Option<u64>,
         end_date: Option<u64>,
-    ) {
+    ) -> Result<(), Error> {
         let mut event: Event = env
             .storage()
             .persistent()
             .get(&DataKey::Event(event_id))
-            .unwrap_or_else(|| panic!("Event not found"));
+            .ok_or(Error::EventNotFound)?;
 
         // Only organizer can update
         event.organizer.require_auth();
 
         // Cannot update a canceled event
         if event.is_canceled {
-            panic!("Cannot update a canceled event");
+            return Err(Error::EventAlreadyCanceled);
         }
 
         let current_time = env.ledger().timestamp();
@@ -292,7 +299,7 @@ impl EventManager {
         // Apply ticket_price if provided (must be non-negative)
         if let Some(p) = ticket_price {
             if p < 0 {
-                panic!("Ticket price cannot be negative");
+                return Err(Error::NegativeTicketPrice);
             }
             event.ticket_price = p;
         }
@@ -300,10 +307,10 @@ impl EventManager {
         // Apply total_tickets if provided (cannot be below tickets_sold)
         if let Some(t) = total_tickets {
             if t == 0 {
-                panic!("Total tickets must be greater than 0");
+                return Err(Error::InvalidTicketCount);
             }
             if t < event.tickets_sold {
-                panic!("Cannot reduce total_tickets below tickets_sold");
+                return Err(Error::TicketsBelowSold);
             }
             event.total_tickets = t;
         }
@@ -313,10 +320,10 @@ impl EventManager {
         // Apply start_date if provided
         if let Some(s) = start_date {
             if s < current_time {
-                panic!("Start date cannot be in the past");
+                return Err(Error::InvalidStartDate);
             }
             if s >= effective_end {
-                panic!("Start date must be before end date");
+                return Err(Error::InvalidEndDate);
             }
             event.start_date = s;
         }
@@ -326,10 +333,10 @@ impl EventManager {
         // Apply end_date if provided
         if let Some(e) = end_date {
             if e < current_time {
-                panic!("End date cannot be in the past");
+                return Err(Error::InvalidEndDate);
             }
             if e <= effective_start {
-                panic!("End date must be after start date");
+                return Err(Error::InvalidEndDate);
             }
             event.end_date = e;
         }
@@ -349,6 +356,8 @@ impl EventManager {
         // Emit event_updated event
         env.events()
             .publish((Symbol::new(&env, "event_updated"),), (event_id, event.organizer.clone()));
+
+        Ok(())
     }
 
     /// Update tickets sold (called by ticket purchase logic)
@@ -382,21 +391,21 @@ impl EventManager {
     }
 
     /// Purchase a ticket for an event
-    pub fn purchase_ticket(env: Env, buyer: Address, event_id: u32) {
+    pub fn purchase_ticket(env: Env, buyer: Address, event_id: u32) -> Result<(), Error> {
         buyer.require_auth();
 
         let mut event: Event = env
             .storage()
             .persistent()
             .get(&DataKey::Event(event_id))
-            .unwrap_or_else(|| panic!("Event not found"));
+            .ok_or(Error::EventNotFound)?;
 
         if event.is_canceled {
-            panic!("Event is canceled");
+            return Err(Error::EventAlreadyCanceled);
         }
 
         if event.tickets_sold >= event.total_tickets {
-            panic!("Event is sold out");
+            return Err(Error::EventSoldOut);
         }
 
         // Handle payment
@@ -443,6 +452,8 @@ impl EventManager {
             (Symbol::new(&env, "ticket_purchased"),),
             (event_id, buyer, event.ticket_nft_addr),
         );
+
+        Ok(())
     }
 
     // ========== Helper Functions ==========
@@ -502,8 +513,6 @@ impl EventManager {
             .ok_or(Error::FactoryNotInitialized)?;
 
         // Call the factory contract to deploy a new NFT contract
-            .unwrap_or_else(|| panic!("Ticket factory not initialized"));
-        // This is a cross-contract call
 
         Ok(nft_addr)
     }
@@ -769,13 +778,12 @@ mod update_event_tests {
     }
 
     #[test]
-    #[should_panic(expected = "Cannot update a canceled event")]
     fn test_update_event_canceled_fails() {
         let env = Env::default();
         let (client, _organizer, event_id) = setup_event_for_update(&env);
         client.cancel_event(&event_id);
 
-        client.update_event(
+        let result = client.try_update_event(
             &event_id,
             &Option::Some(String::from_str(&env, "Should fail")),
             &Option::None,
@@ -783,10 +791,10 @@ mod update_event_tests {
             &Option::None,
             &Option::None,
         );
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "Cannot reduce total_tickets below tickets_sold")]
     fn test_update_event_total_tickets_below_sold_fails() {
         let env = Env::default();
         env.mock_all_auths();
@@ -812,7 +820,7 @@ mod update_event_tests {
         client.purchase_ticket(&buyer, &event_id);
         client.purchase_ticket(&Address::generate(&env), &event_id);
 
-        client.update_event(
+        let result = client.try_update_event(
             &event_id,
             &Option::None,
             &Option::None,
@@ -820,10 +828,10 @@ mod update_event_tests {
             &Option::None,
             &Option::None,
         );
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "Start date cannot be in the past")]
     fn test_update_event_start_date_past_fails() {
         let env = Env::default();
         let (client, _organizer, event_id) = setup_event_for_update(&env);
@@ -831,7 +839,7 @@ mod update_event_tests {
             .set_timestamp(env.ledger().timestamp() + 86400 * 2);
         let past_start = env.ledger().timestamp() - 3600;
 
-        client.update_event(
+        let result = client.try_update_event(
             &event_id,
             &Option::None,
             &Option::None,
@@ -839,17 +847,17 @@ mod update_event_tests {
             &Option::Some(past_start),
             &Option::None,
         );
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "Start date must be before end date")]
     fn test_update_event_end_before_start_fails() {
         let env = Env::default();
         let (client, _organizer, event_id) = setup_event_for_update(&env);
         let start_date = env.ledger().timestamp() + 86400;
         let end_before_start = start_date - 3600;
 
-        client.update_event(
+        let result = client.try_update_event(
             &event_id,
             &Option::None,
             &Option::None,
@@ -857,10 +865,10 @@ mod update_event_tests {
             &Option::Some(start_date),
             &Option::Some(end_before_start),
         );
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "Event not found")]
     fn test_update_event_not_found_fails() {
         let env = Env::default();
         let contract_id = env.register(EventManager, ());
@@ -869,7 +877,7 @@ mod update_event_tests {
         env.mock_all_auths();
         client.initialize(&mock_addr);
 
-        client.update_event(
+        let result = client.try_update_event(
             &999u32,
             &Option::None,
             &Option::None,
@@ -877,6 +885,7 @@ mod update_event_tests {
             &Option::None,
             &Option::None,
         );
+        assert!(result.is_err());
     }
 }
 

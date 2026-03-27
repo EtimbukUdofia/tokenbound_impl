@@ -69,7 +69,6 @@ fn test_create_event() {
 }
 
 #[test]
-#[should_panic(expected = "Start date must be in the future")]
 fn test_create_event_past_date() {
     let env = Env::default();
     let contract_id = env.register(EventManager, ());
@@ -87,7 +86,7 @@ fn test_create_event_past_date() {
     let start_date = 500; // Past date
     let end_date = 1500;
 
-    client.create_event(
+    let result = client.try_create_event(
         &organizer,
         &theme,
         &event_type,
@@ -97,6 +96,7 @@ fn test_create_event_past_date() {
         &100,
         &Address::generate(&env),
     );
+    assert!(result.is_err());
 }
 
 #[test]
@@ -213,7 +213,6 @@ fn test_claim_refund_successful() {
 }
 
 #[test]
-#[should_panic(expected = "Event is not canceled")]
 fn test_claim_refund_event_not_canceled() {
     let env = Env::default();
     env.mock_all_auths();
@@ -241,11 +240,11 @@ fn test_claim_refund_event_not_canceled() {
     client.purchase_ticket(&buyer, &event_id);
 
     // Try to claim refund without canceling event
-    client.claim_refund(&buyer, &event_id);
+    let result = client.try_claim_refund(&buyer, &event_id);
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic(expected = "Refund already claimed")]
 fn test_claim_refund_double_claim() {
     let env = Env::default();
     env.mock_all_auths();
@@ -277,11 +276,11 @@ fn test_claim_refund_double_claim() {
     client.claim_refund(&buyer, &event_id);
 
     // Try to claim again (should fail)
-    client.claim_refund(&buyer, &event_id);
+    let result = client.try_claim_refund(&buyer, &event_id);
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic(expected = "Claimer did not purchase a ticket for this event")]
 fn test_claim_refund_no_ticket_purchased() {
     let env = Env::default();
     env.mock_all_auths();
@@ -311,7 +310,8 @@ fn test_claim_refund_no_ticket_purchased() {
     client.cancel_event(&event_id);
 
     // Try to claim refund without purchasing
-    client.claim_refund(&non_buyer, &event_id);
+    let result = client.try_claim_refund(&non_buyer, &event_id);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -392,7 +392,6 @@ fn test_multiple_refund_claims() {
 }
 
 #[test]
-#[should_panic(expected = "Event not found")]
 fn test_claim_refund_nonexistent_event() {
     let env = Env::default();
     env.mock_all_auths();
@@ -406,5 +405,6 @@ fn test_claim_refund_nonexistent_event() {
     let buyer = Address::generate(&env);
 
     // Try to claim refund for non-existent event
-    client.claim_refund(&buyer, &999u32);
+    let result = client.try_claim_refund(&buyer, &999u32);
+    assert!(result.is_err());
 }
