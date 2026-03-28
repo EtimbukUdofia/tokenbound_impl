@@ -1,29 +1,42 @@
-import { env } from "./env";
-import {
-  createTokenboundSdk,
-  type EventRecord,
-  type SignTransactionFn,
-  type SorobanSubmitResult,
-} from "../sdk/src";
+import { nativeToScVal, scValToNative } from "@stellar/stellar-base";
+import { signTransaction } from "@stellar/freighter-api";
+
+// Use require for the default export
+const StellarSdk = require("@stellar/stellar-sdk");
+const { Server, TransactionBuilder, Operation, SorobanRpc } = StellarSdk;
+
+// Import Networks separately to avoid conflict
+import { Networks } from "@stellar/stellar-sdk";
+
+// Configuration helpers – prefer environment variables so they can be swapped
+// for different networks (testnet / preview / mainnet) without changing code.
+const HORIZON_URL =
+  process.env.NEXT_PUBLIC_HORIZON_URL || "https://horizon-testnet.stellar.org";
+const SOROBAN_RPC_URL =
+  process.env.NEXT_PUBLIC_SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
+const NETWORK_PASSPHRASE =
+  process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE || Networks.TESTNET;
+// contract ID of the deployed EventManager; set this in .env.local
+const EVENT_MANAGER_CONTRACT =
+  process.env.NEXT_PUBLIC_EVENT_MANAGER_CONTRACT || "<MISSING_CONTRACT_ID>";
 
 export interface CreateEventParams {
-  organizer: string;
+  organizer: string; // wallet address
   theme: string;
   eventType: string;
   startTimeUnix: number;
   endTimeUnix: number;
   ticketPrice: bigint;
   totalTickets: bigint;
-  paymentToken: string;
+  paymentToken: string; // contract address for token used for payment
 }
 
-export interface PurchaseTicketParams {
-  buyer: string;
-  eventId: number;
-  tierIndex?: number;
-}
+export type SignTransactionFn = (
+  txXdr: string,
+  options: { networkPassphrase: string; address: string }
+) => Promise<string>;
 
-export interface PurchaseTicketsParams {
+export interface BuyTicketsParams {
   buyer: string;
   eventId: number;
   quantity: bigint;
@@ -54,147 +67,248 @@ export interface UpdateEventParams {
   end_date?: number;
 }
 
-const sdk = createTokenboundSdk({
-  horizonUrl: env.NEXT_PUBLIC_HORIZON_URL,
-  sorobanRpcUrl: env.NEXT_PUBLIC_SOROBAN_RPC_URL,
-  networkPassphrase: env.NEXT_PUBLIC_NETWORK_PASSPHRASE,
-  simulationSource: process.env.NEXT_PUBLIC_SOROBAN_SIM_SOURCE,
-  contracts: {
-    eventManager: env.NEXT_PUBLIC_EVENT_MANAGER_CONTRACT,
-    ticketFactory: process.env.NEXT_PUBLIC_TICKET_FACTORY_CONTRACT,
-    ticketNft: process.env.NEXT_PUBLIC_TICKET_NFT_CONTRACT,
-    tbaRegistry: process.env.NEXT_PUBLIC_TBA_REGISTRY_CONTRACT,
-    tbaAccount: process.env.NEXT_PUBLIC_TBA_ACCOUNT_CONTRACT,
-  },
-});
-
-function normalizeEvent(record: EventRecord): Event {
-  return {
-    id: record.id,
-    theme: record.theme,
-    organizer: record.organizer,
-    event_type: record.eventType,
-    total_tickets: record.totalTickets,
-    tickets_sold: record.ticketsSold,
-    ticket_price: record.ticketPrice,
-    start_date: record.startDate,
-    end_date: record.endDate,
-    is_canceled: record.isCanceled,
-    ticket_nft_addr: record.ticketNftAddress,
-    payment_token: record.paymentToken,
-  };
-}
-
 export function isEventManagerConfigured() {
-  return (
-    sdk.hasContract("eventManager") &&
-    env.NEXT_PUBLIC_EVENT_MANAGER_CONTRACT !== "<MISSING_CONTRACT_ID>"
-  );
+  return EVENT_MANAGER_CONTRACT !== "<MISSING_CONTRACT_ID>";
 }
 
-export function getTxExplorerUrl(txHash: string): string {
-  return sdk.getExplorerUrl(txHash);
-}
-
+/**
+ * Builds, signs (via provider adapter) and submits a transaction to create a new
+ * event using the EventManager Soroban contract.
+ */
 export async function createEvent(
   params: CreateEventParams,
   signTransactionFn: SignTransactionFn
-): Promise<SorobanSubmitResult> {
-  return sdk.eventManager.createEventLegacy(
-    {
-      organizer: params.organizer,
-      theme: params.theme,
-      eventType: params.eventType,
-      startDate: params.startTimeUnix,
-      endDate: params.endTimeUnix,
-      ticketPrice: params.ticketPrice,
-      totalTickets: params.totalTickets,
-      paymentToken: params.paymentToken,
-    },
-    {
-      source: params.organizer,
-      signTransaction: signTransactionFn,
-    }
-  );
-}
-
-export async function purchaseTicket(
-  params: PurchaseTicketParams,
-  signTransactionFn: SignTransactionFn
-): Promise<SorobanSubmitResult> {
-  return sdk.eventManager.purchaseTicket(params, {
-    source: params.buyer,
-    signTransaction: signTransactionFn,
-  });
-}
-
-export async function purchaseTickets(
-  params: PurchaseTicketsParams,
-  signTransactionFn: SignTransactionFn
-): Promise<SorobanSubmitResult> {
-  return sdk.eventManager.purchaseTickets(params, {
-    source: params.buyer,
-    signTransaction: signTransactionFn,
-  });
-}
-
-export async function getAllEvents(simulationSource?: string | null): Promise<Event[]> {
+) {
   if (!isEventManagerConfigured()) {
-    return [];
+    throw new Error(
+      "EVENT_MANAGER_CONTRACT is not configured. Set NEXT_PUBLIC_EVENT_MANAGER_CONTRACT in your env."
+    );
   }
-  const events = await sdk.eventManager.getAllEvents({ simulationSource });
-  return events.map(normalizeEvent);
-}
 
-export async function cancelEvent(
-  organizer: string,
-  eventId: number,
-  signTransactionFn: SignTransactionFn
-) {
-  return sdk.eventManager.cancelEvent(eventId, {
-    source: organizer,
-    signTransaction: signTransactionFn,
+  const server = new Server(HORIZON_URL);
+
+  // load account to obtain current sequence number
+  const sourceAccount = await server.loadAccount(params.organizer);
+
+  // use the standard base fee
+  const fee = await server.fetchBaseFee();
+
+  // prepare soroban arguments converting native JS values to ScVals
+  const args = [
+    nativeToScVal(params.organizer, { type: "address" }),
+    nativeToScVal(params.theme, { type: "string" }),
+    nativeToScVal(params.eventType, { type: "string" }),
+    nativeToScVal(params.startTimeUnix, { type: "u64" }),
+    nativeToScVal(params.endTimeUnix, { type: "u64" }),
+    nativeToScVal(params.ticketPrice, { type: "i128" }),
+    nativeToScVal(params.totalTickets, { type: "u128" }),
+    nativeToScVal(params.paymentToken, { type: "address" }),
+  ];
+
+  const operation = Operation.invokeContractFunction({
+    contract: EVENT_MANAGER_CONTRACT,
+    function: "create_event",
+    args,
   });
-}
 
-export async function updateEvent(
-  params: UpdateEventParams,
-  signTransactionFn: SignTransactionFn
-) {
-  return sdk.eventManager.updateEvent(
-    {
-      organizer: params.organizer,
-      eventId: params.event_id,
-      theme: params.theme,
-      ticketPrice: params.ticket_price,
-      totalTickets: params.total_tickets,
-      startDate: params.start_date,
-      endDate: params.end_date,
-    },
-    {
-      source: params.organizer,
-      signTransaction: signTransactionFn,
-    }
-  );
-}
+  const tx = new TransactionBuilder(sourceAccount, {
+    fee: fee.toString(),
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(operation)
+    .setTimeout(30)
+    .build();
 
-export async function claimFunds(
-  organizer: string,
-  eventId: number,
-  signTransactionFn: SignTransactionFn
-) {
-  return sdk.eventManager.withdrawFunds(eventId, {
-    source: organizer,
-    signTransaction: signTransactionFn,
+  const txXdr = tx.toXDR();
+
+  // ask configured wallet provider to sign
+  const signedTxXdr = await signTransactionFn(txXdr, {
+    networkPassphrase: NETWORK_PASSPHRASE,
+    address: params.organizer,
   });
+
+  // submit to horizon and return the result
+  const signedTx = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
+  return await server.submitTransaction(signedTx as any);
 }
 
-export async function getEventAttendees(
-  eventId: number,
-  simulationSource?: string | null
-): Promise<string[]> {
+export async function buyTickets(
+  params: BuyTicketsParams,
+  signTransactionFn: SignTransactionFn
+) {
   if (!isEventManagerConfigured()) {
-    return [];
+    throw new Error(
+      "EVENT_MANAGER_CONTRACT is not configured. Set NEXT_PUBLIC_EVENT_MANAGER_CONTRACT in your env."
+    );
   }
-  return sdk.eventManager.getEventBuyers(eventId, { simulationSource });
+
+  const server = new Server(HORIZON_URL);
+  const sourceAccount = await server.loadAccount(params.buyer);
+  const fee = await server.fetchBaseFee();
+
+  const args = [
+    nativeToScVal(params.buyer, { type: "address" }),
+    nativeToScVal(params.eventId, { type: "u32" }),
+    nativeToScVal(params.quantity, { type: "u128" }),
+  ];
+
+  const operation = Operation.invokeContractFunction({
+    contract: EVENT_MANAGER_CONTRACT,
+    function: "purchase_tickets",
+    args,
+  });
+
+  const tx = new TransactionBuilder(sourceAccount, {
+    fee: fee.toString(),
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(operation)
+    .setTimeout(30)
+    .build();
+
+  const txXdr = tx.toXDR();
+  const signedTxXdr = await signTransactionFn(txXdr, {
+    networkPassphrase: NETWORK_PASSPHRASE,
+    address: params.buyer,
+  });
+
+  const signedTx = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
+  return await server.submitTransaction(signedTx as any);
+}
+
+async function simulateAndInvoke(
+  caller: string,
+  functionName: string,
+  args: ReturnType<typeof nativeToScVal>[]
+) {
+  const rpc = new SorobanRpc.Server(SOROBAN_RPC_URL);
+  const server = new Server(HORIZON_URL);
+  const sourceAccount = await server.loadAccount(caller);
+  const fee = await server.fetchBaseFee();
+
+  const operation = Operation.invokeContractFunction({
+    contract: EVENT_MANAGER_CONTRACT,
+    function: functionName,
+    args,
+  });
+
+  const tx = new TransactionBuilder(sourceAccount, {
+    fee: fee.toString(),
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(operation)
+    .setTimeout(30)
+    .build();
+
+  const txXdr = tx.toXDR();
+  const signedTxXdr = await signTransaction(txXdr, {
+    networkPassphrase: NETWORK_PASSPHRASE,
+    address: caller,
+  });
+
+  const signedTx = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
+  return await server.submitTransaction(signedTx as any);
+}
+
+/** Read all events from the contract (view call, no signing needed). */
+export async function getAllEvents(): Promise<Event[]> {
+  const rpc = new SorobanRpc.Server(SOROBAN_RPC_URL);
+
+  // Use a dummy fee account for simulation – we just need a read
+  const operation = Operation.invokeContractFunction({
+    contract: EVENT_MANAGER_CONTRACT,
+    function: "get_all_events",
+    args: [],
+  });
+
+  // Build a transaction with a placeholder account (won't be submitted)
+  const tx = new TransactionBuilder(
+    { accountId: () => EVENT_MANAGER_CONTRACT, sequenceNumber: () => "0", incrementSequenceNumber: () => {} } as any,
+    { fee: "100", networkPassphrase: NETWORK_PASSPHRASE }
+  )
+    .addOperation(operation)
+    .setTimeout(30)
+    .build();
+
+  const simResult = await rpc.simulateTransaction(tx);
+  if (SorobanRpc.Api.isSimulationError(simResult)) {
+    throw new Error(`Simulation failed: ${simResult.error}`);
+  }
+
+  const returnVal = (simResult as SorobanRpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+  if (!returnVal) return [];
+
+  const raw = scValToNative(returnVal) as any[];
+  return raw.map((e: any) => ({
+    id: Number(e.id),
+    theme: e.theme,
+    organizer: e.organizer,
+    event_type: e.event_type,
+    total_tickets: BigInt(e.total_tickets),
+    tickets_sold: BigInt(e.tickets_sold),
+    ticket_price: BigInt(e.ticket_price),
+    start_date: Number(e.start_date),
+    end_date: Number(e.end_date),
+    is_canceled: e.is_canceled,
+    ticket_nft_addr: e.ticket_nft_addr,
+    payment_token: e.payment_token,
+  }));
+}
+
+/** Cancel an event. Caller must be the organizer. */
+export async function cancelEvent(organizer: string, eventId: number) {
+  return simulateAndInvoke(organizer, "cancel_event", [
+    nativeToScVal(eventId, { type: "u32" }),
+  ]);
+}
+
+/** Update event details. Caller must be the organizer. */
+export async function updateEvent(params: UpdateEventParams) {
+  const toOption = (val: any, type: string) =>
+    val !== undefined
+      ? nativeToScVal({ Some: nativeToScVal(val, { type }) }, { type: "option" })
+      : nativeToScVal(null, { type: "option" });
+
+  return simulateAndInvoke(params.organizer, "update_event", [
+    nativeToScVal(params.event_id, { type: "u32" }),
+    toOption(params.theme, "string"),
+    toOption(params.ticket_price, "i128"),
+    toOption(params.total_tickets, "u128"),
+    toOption(params.start_date, "u64"),
+    toOption(params.end_date, "u64"),
+  ]);
+}
+
+/** Claim funds after event completion. Caller must be the organizer. */
+export async function claimFunds(organizer: string, eventId: number) {
+  return simulateAndInvoke(organizer, "withdraw_funds", [
+    nativeToScVal(eventId, { type: "u32" }),
+  ]);
+}
+
+/** Get attendees (buyers) for an event. */
+export async function getEventAttendees(eventId: number): Promise<string[]> {
+  const rpc = new SorobanRpc.Server(SOROBAN_RPC_URL);
+
+  const operation = Operation.invokeContractFunction({
+    contract: EVENT_MANAGER_CONTRACT,
+    function: "get_event_buyers",
+    args: [nativeToScVal(eventId, { type: "u32" })],
+  });
+
+  const tx = new TransactionBuilder(
+    { accountId: () => EVENT_MANAGER_CONTRACT, sequenceNumber: () => "0", incrementSequenceNumber: () => {} } as any,
+    { fee: "100", networkPassphrase: NETWORK_PASSPHRASE }
+  )
+    .addOperation(operation)
+    .setTimeout(30)
+    .build();
+
+  const simResult = await rpc.simulateTransaction(tx);
+  if (SorobanRpc.Api.isSimulationError(simResult)) return [];
+
+  const returnVal = (simResult as SorobanRpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+  if (!returnVal) return [];
+
+  return scValToNative(returnVal) as string[];
 }
