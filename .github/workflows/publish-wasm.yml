@@ -1,0 +1,54 @@
+name: Publish WASM Artifacts
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.0.0
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required for creating releases
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32v1-none
+          override: true
+
+      - name: Build contracts
+        run: |
+          cd soroban-contract
+          cargo build --release
+
+      - name: Generate checksums
+        run: |
+          cd soroban-contract/target/wasm32v1-none/release
+          sha256sum *.wasm > checksums.txt
+          cat checksums.txt
+
+      - name: Generate changelog
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "# Release $VERSION" > CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "## Changes" >> CHANGELOG.md
+          git log $(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "HEAD")..HEAD --pretty=format:"- %s" >> CHANGELOG.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          files: |
+            soroban-contract/target/wasm32v1-none/release/*.wasm
+            soroban-contract/target/wasm32v1-none/release/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
