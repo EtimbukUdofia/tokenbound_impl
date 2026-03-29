@@ -118,7 +118,9 @@ impl MarketplaceContract {
         };
         
         env.storage().persistent().set(&DataKey::Listing(listing_id), &listing);
-        env.storage().persistent().set(&DataKey::TotalListings, &(listing_id + 1));
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalListings, &(listing_id.checked_add(1).unwrap()));
         
         env.events().publish(
             ("listing_created",),
@@ -156,6 +158,11 @@ impl MarketplaceContract {
         
         let token_client = token::Client::new(&env, &payment_token);
         
+        // Mark listing as inactive BEFORE external calls (Checks-Effects-Interactions)
+        let mut updated_listing = listing.clone();
+        updated_listing.active = false;
+        env.storage().persistent().set(&DataKey::Listing(listing_id), &updated_listing);
+
         // Transfer payment from buyer to seller
         token_client.transfer(&buyer, &listing.seller, &listing.price);
         
@@ -170,11 +177,6 @@ impl MarketplaceContract {
             &listing.token_id,
         );
         
-        // Mark listing as inactive
-        let mut updated_listing = listing.clone();
-        updated_listing.active = false;
-        env.storage().persistent().set(&DataKey::Listing(listing_id), &updated_listing);
-        
         // Record sale
         let total_sales: u32 = env.storage().persistent().get(&DataKey::TotalSales).unwrap_or(0);
         let sale = Sale {
@@ -187,7 +189,9 @@ impl MarketplaceContract {
         };
         
         env.storage().persistent().set(&DataKey::Sale(total_sales), &sale);
-        env.storage().persistent().set(&DataKey::TotalSales, &(total_sales + 1));
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalSales, &(total_sales.checked_add(1).unwrap()));
         
         env.events().publish(
             ("purchase_completed",),

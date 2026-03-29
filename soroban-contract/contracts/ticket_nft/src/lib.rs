@@ -115,7 +115,7 @@ impl TicketNft {
 
         env.storage()
             .instance()
-            .set(&DataKey::NextTokenId, &(token_id + 1));
+            .set(&DataKey::NextTokenId, &(token_id.checked_add(1).unwrap()));
 
         // Extend instance TTL on update
         env.storage()
