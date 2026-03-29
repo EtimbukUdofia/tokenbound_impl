@@ -59,7 +59,7 @@ fn make_event(
     tiers: Vec<TierConfig>,
 ) -> (Address, u32) {
     let (organizer, params) = make_params(env, mock_addr, tiers);
-    let event_id = client.create_event(&params);
+    let event_id = client.create_event_with_tiers(&params);
     (organizer, event_id)
 }
 
@@ -72,7 +72,7 @@ fn test_create_event() {
     let organizer = Address::generate(&env);
     let start_date = env.ledger().timestamp() + 86_400;
 
-    let event_id = client.create_event(&CreateEventParams {
+    let event_id = client.create_event_with_tiers(&CreateEventParams {
         organizer: organizer.clone(),
         theme: String::from_str(&env, "Rust Conference 2026"),
         event_type: String::from_str(&env, "Conference"),
@@ -101,7 +101,7 @@ fn test_create_event_past_start_date_fails() {
     let organizer = Address::generate(&env);
     env.ledger().set_timestamp(1_000);
 
-    let result = client.try_create_event(&CreateEventParams {
+    let result = client.try_create_event_with_tiers(&CreateEventParams {
         organizer,
         theme: String::from_str(&env, "Past Event"),
         event_type: String::from_str(&env, "Conference"),
@@ -208,7 +208,7 @@ fn test_claim_refund_free_ticket() {
     let buyer = Address::generate(&env);
     let start = env.ledger().timestamp() + 86_400;
 
-    let event_id = client.create_event(&CreateEventParams {
+    let event_id = client.create_event_with_tiers(&CreateEventParams {
         organizer,
         theme: String::from_str(&env, "Free Event"),
         event_type: String::from_str(&env, "Conference"),
@@ -381,7 +381,7 @@ fn test_purchase_tickets_increments_tickets_sold() {
     let (_, event_id) = make_event(&env, &client, &mock_addr, Vec::new(&env));
     let buyer = Address::generate(&env);
 
-    client.purchase_tickets(&buyer, &event_id, &3u128);
+    client.purchase_tickets(&buyer, &event_id, &0u32, &3u128);
 
     let event = client.get_event(&event_id);
     let purchase = client.get_buyer_purchase(&event_id, &buyer).unwrap();
@@ -397,7 +397,7 @@ fn test_purchase_tickets_applies_group_discount() {
     let start = env.ledger().timestamp() + 86_400;
 
     // Create event with ticket_price = 100 and enough total tickets
-    let event_id = client.create_event(&CreateEventParams {
+    let event_id = client.create_event_with_tiers(&CreateEventParams {
         organizer,
         theme: String::from_str(&env, "Stellar Meetup"),
         event_type: String::from_str(&env, "Conference"),
@@ -410,7 +410,7 @@ fn test_purchase_tickets_applies_group_discount() {
     });
     let buyer = Address::generate(&env);
 
-    client.purchase_tickets(&buyer, &event_id, &5u128);
+    client.purchase_tickets(&buyer, &event_id, &0u32, &5u128);
 
     let purchase = client.get_buyer_purchase(&event_id, &buyer).unwrap();
     assert_eq!(purchase.quantity, 5);
@@ -425,7 +425,7 @@ fn test_batch_purchase_refund_uses_total_paid() {
     let organizer = Address::generate(&env);
     let start = env.ledger().timestamp() + 86_400;
 
-    let event_id = client.create_event(&CreateEventParams {
+    let event_id = client.create_event_with_tiers(&CreateEventParams {
         organizer,
         theme: String::from_str(&env, "Meetup"),
         event_type: String::from_str(&env, "Conference"),
@@ -438,7 +438,7 @@ fn test_batch_purchase_refund_uses_total_paid() {
     });
     let buyer = Address::generate(&env);
 
-    client.purchase_tickets(&buyer, &event_id, &10u128);
+    client.purchase_tickets(&buyer, &event_id, &0u32, &10u128);
     client.cancel_event(&event_id);
     client.claim_refund(&buyer, &event_id);
 }
@@ -526,20 +526,14 @@ fn test_withdraw_funds_double_withdrawal() {
     let env = Env::default();
     let (client, mock_addr) = setup(&env);
     let (_, event_id) = make_event(&env, &client, &mock_addr, Vec::new(&env));
-    // Event has 10 tickets, none sold — should fail
-    let result = client.try_join_waitlist(&Address::generate(&env), &event_id);
-    assert!(result.is_err());
-}
 
     client.purchase_ticket(&Address::generate(&env), &event_id, &0u32);
 
     let event = client.get_event(&event_id);
     env.ledger().set_timestamp(event.end_date + 1);
 
-    // First withdrawal succeeds
     client.withdraw_funds(&event_id);
 
-    // Second withdrawal must fail
     let result = client.try_withdraw_funds(&event_id);
     assert!(result.is_err());
 }
@@ -561,7 +555,7 @@ fn test_withdraw_funds_zero_balance() {
     // Free event: ticket_price = 0
     let organizer = Address::generate(&env);
     let start = env.ledger().timestamp() + 86_400;
-    let event_id = client.create_event(&CreateEventParams {
+    let event_id = client.create_event_with_tiers(&CreateEventParams {
         organizer,
         theme: String::from_str(&env, "Free Event"),
         event_type: String::from_str(&env, "Conference"),
@@ -589,7 +583,7 @@ fn test_withdraw_funds_after_partial_refunds() {
     let organizer = Address::generate(&env);
     let start = env.ledger().timestamp() + 86_400;
 
-    let event_id = client.create_event(&CreateEventParams {
+    let event_id = client.create_event_with_tiers(&CreateEventParams {
         organizer,
         theme: String::from_str(&env, "Hybrid Event"),
         event_type: String::from_str(&env, "Conference"),
@@ -617,5 +611,104 @@ fn test_withdraw_funds_after_partial_refunds() {
     let event = client.get_event(&event_id);
     env.ledger().set_timestamp(event.end_date + 1);
     let result = client.try_withdraw_funds(&event_id);
+    assert!(result.is_err());
+}
+
+// ========== Validation & rate limiting ==========
+
+#[test]
+fn test_empty_theme_rejected() {
+    let env = Env::default();
+    let (client, mock_addr) = setup(&env);
+    let organizer = Address::generate(&env);
+    let start = env.ledger().timestamp() + 86_400;
+    let result = client.try_create_event_with_tiers(&CreateEventParams {
+        organizer,
+        theme: String::from_str(&env, ""),
+        event_type: String::from_str(&env, "Conference"),
+        start_date: start,
+        end_date: start + 86_400,
+        ticket_price: 1,
+        total_tickets: 5,
+        payment_token: mock_addr,
+        tiers: Vec::new(&env),
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_rate_limit_blocks_second_concurrent_event() {
+    let env = Env::default();
+    let (client, mock_addr) = setup(&env);
+    let organizer = Address::generate(&env);
+    let start = env.ledger().timestamp() + 86_400;
+    let payment = mock_addr.clone();
+    let p1 = CreateEventParams {
+        organizer: organizer.clone(),
+        theme: String::from_str(&env, "First"),
+        event_type: String::from_str(&env, "Conference"),
+        start_date: start,
+        end_date: start + 86_400,
+        ticket_price: 1,
+        total_tickets: 5,
+        payment_token: payment.clone(),
+        tiers: Vec::new(&env),
+    };
+    client.create_event_with_tiers(&p1);
+    let p2 = CreateEventParams {
+        organizer,
+        theme: String::from_str(&env, "Second"),
+        event_type: String::from_str(&env, "Conference"),
+        start_date: start + 200_000,
+        end_date: start + 300_000,
+        ticket_price: 1,
+        total_tickets: 5,
+        payment_token: payment,
+        tiers: Vec::new(&env),
+    };
+    assert!(client.try_create_event_with_tiers(&p2).is_err());
+}
+
+#[test]
+fn test_cancel_allows_immediate_new_event_same_organizer() {
+    let env = Env::default();
+    let (client, mock_addr) = setup(&env);
+    let organizer = Address::generate(&env);
+    let start = env.ledger().timestamp() + 86_400;
+    let payment = mock_addr.clone();
+    let p1 = CreateEventParams {
+        organizer: organizer.clone(),
+        theme: String::from_str(&env, "First"),
+        event_type: String::from_str(&env, "Conference"),
+        start_date: start,
+        end_date: start + 86_400,
+        ticket_price: 1,
+        total_tickets: 5,
+        payment_token: payment.clone(),
+        tiers: Vec::new(&env),
+    };
+    let id = client.create_event_with_tiers(&p1);
+    client.cancel_event(&id);
+    let p2 = CreateEventParams {
+        organizer,
+        theme: String::from_str(&env, "Replacement"),
+        event_type: String::from_str(&env, "Conference"),
+        start_date: start + 200_000,
+        end_date: start + 300_000,
+        ticket_price: 1,
+        total_tickets: 5,
+        payment_token: payment,
+        tiers: Vec::new(&env),
+    };
+    assert!(client.try_create_event_with_tiers(&p2).is_ok());
+}
+
+#[test]
+fn test_purchase_quantity_over_limit_fails() {
+    let env = Env::default();
+    let (client, mock_addr) = setup(&env);
+    let (_, event_id) = make_event(&env, &client, &mock_addr, Vec::new(&env));
+    let buyer = Address::generate(&env);
+    let result = client.try_purchase_tickets(&buyer, &event_id, &0u32, &501u128);
     assert!(result.is_err());
 }

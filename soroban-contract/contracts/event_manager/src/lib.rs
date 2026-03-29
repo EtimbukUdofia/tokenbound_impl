@@ -29,6 +29,15 @@ pub enum Error {
     NotABuyer = 16,
     EventSoldOut = 17,
     TicketsBelowSold = 18,
+    EventNotEnded = 19,
+    FundsAlreadyWithdrawn = 20,
+    InvalidStringInput = 21,
+    TicketPriceOutOfRange = 22,
+    TooManyOrganizerEvents = 23,
+    EventCreationRateLimited = 24,
+    EventScheduleOutOfRange = 25,
+    TooManyTicketTiers = 26,
+    PurchaseQuantityTooLarge = 27,
 }
 
 #[contracttype]
@@ -40,6 +49,13 @@ pub enum DataKey {
     EventBuyers(u32),
     EventTiers(u32),
     BuyerPurchase(u32, Address),
+    Waitlist(u32),
+    EventBalance(u32),
+    FundsWithdrawn(u32),
+    /// Count of events occupying an organizer slot (created, not yet canceled or withdrawn).
+    OrganizerOpenEventCount(Address),
+    /// Last ledger timestamp when this organizer successfully created an event.
+    OrganizerLastCreateTs(Address),
 }
 
 /// A single ticket tier (e.g. VIP, General, Early Bird)
@@ -121,6 +137,17 @@ pub struct EventManager;
 
 #[contractimpl]
 impl EventManager {
+    /// Maximum UTF-8 byte length for user-provided strings (theme, type, tier names).
+    const MAX_STRING_BYTES: u32 = 200;
+    const MAX_TICKET_TIERS: u32 = 32;
+    const MAX_TICKETS_PER_EVENT: u128 = 500_000;
+    const MAX_TICKET_PRICE: i128 = 10_000_000_000_000_000;
+    const MAX_ORGANIZER_OPEN_EVENTS: u32 = 50;
+    const EVENT_CREATE_COOLDOWN_SECS: u64 = 120;
+    const MAX_EVENT_DURATION_SECS: u64 = 366 * 86_400;
+    const MAX_EVENT_START_AHEAD_SECS: u64 = 5 * 366 * 86_400;
+    const MAX_PURCHASE_QUANTITY: u128 = 500;
+
     pub fn initialize(env: Env, ticket_factory: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::TicketFactory) {
             return Err(Error::AlreadyInitialized);
@@ -136,15 +163,26 @@ impl EventManager {
     pub fn create_event_with_tiers(env: Env, params: CreateEventParams) -> Result<u32, Error> {
         params.organizer.require_auth();
 
-        // Validate basic params
-        if params.start_date <= env.ledger().timestamp() {
-            return Err(Error::InvalidStartDate);
-        }
-        if params.end_date <= params.start_date {
-            return Err(Error::InvalidEndDate);
+        Self::validate_create_schedule(&env, params.start_date, params.end_date)?;
+        Self::validate_bounded_string(&params.theme, Self::MAX_STRING_BYTES)?;
+        Self::validate_bounded_string(&params.event_type, Self::MAX_STRING_BYTES)?;
+        Self::validate_ticket_price(params.ticket_price)?;
+
+        if !params.tiers.is_empty() {
+            if params.tiers.len() > Self::MAX_TICKET_TIERS {
+                return Err(Error::TooManyTicketTiers);
+            }
         }
 
+        Self::enforce_organizer_limits_and_rate(&env, &params.organizer)?;
+
         let resolved_tiers = if params.tiers.is_empty() {
+            if params.total_tickets == 0 {
+                return Err(Error::InvalidTicketCount);
+            }
+            if params.total_tickets > Self::MAX_TICKETS_PER_EVENT {
+                return Err(Error::InvalidTicketCount);
+            }
             let mut v = Vec::new(&env);
             v.push_back(TicketTier {
                 name: String::from_str(&env, "General"),
@@ -156,10 +194,15 @@ impl EventManager {
         } else {
             let mut v = Vec::new(&env);
             for cfg in params.tiers.iter() {
+                Self::validate_bounded_string(&cfg.name, Self::MAX_STRING_BYTES)?;
                 if cfg.price < 0 {
                     return Err(Error::NegativeTicketPrice);
                 }
+                Self::validate_ticket_price(cfg.price)?;
                 if cfg.total_quantity == 0 {
+                    return Err(Error::InvalidTierConfig);
+                }
+                if cfg.total_quantity > Self::MAX_TICKETS_PER_EVENT {
                     return Err(Error::InvalidTierConfig);
                 }
                 v.push_back(TicketTier {
@@ -173,6 +216,9 @@ impl EventManager {
         };
 
         let agg_total: u128 = resolved_tiers.iter().map(|t| t.total_quantity).sum();
+        if agg_total == 0 || agg_total > Self::MAX_TICKETS_PER_EVENT {
+            return Err(Error::InvalidTicketCount);
+        }
         let agg_price = resolved_tiers
             .first()
             .map(|t| t.price)
@@ -216,8 +262,10 @@ impl EventManager {
 
         env.events().publish(
             (Symbol::new(&env, "event_created"),),
-            (event_id, params.organizer, ticket_nft_addr),
+            (event_id, params.organizer.clone(), ticket_nft_addr),
         );
+
+        Self::commit_organizer_create(&env, &params.organizer);
 
         Ok(event_id)
     }
@@ -324,6 +372,8 @@ impl EventManager {
             );
         }
 
+        Self::decrement_organizer_open_events(&env, &event.organizer);
+
         Ok(())
     }
 
@@ -408,6 +458,9 @@ impl EventManager {
 
         if quantity == 0 {
             return Err(Error::InvalidTicketCount);
+        }
+        if quantity > Self::MAX_PURCHASE_QUANTITY {
+            return Err(Error::PurchaseQuantityTooLarge);
         }
 
         let mut event: Event = env
@@ -542,6 +595,7 @@ impl EventManager {
         let current_time = env.ledger().timestamp();
 
         if let Some(t) = theme {
+            Self::validate_bounded_string(&t, Self::MAX_STRING_BYTES)?;
             event.theme = t;
         }
 
@@ -549,11 +603,15 @@ impl EventManager {
             if p < 0 {
                 return Err(Error::NegativeTicketPrice);
             }
+            Self::validate_ticket_price(p)?;
             event.ticket_price = p;
         }
 
         if let Some(t) = total_tickets {
             if t == 0 {
+                return Err(Error::InvalidTicketCount);
+            }
+            if t > Self::MAX_TICKETS_PER_EVENT {
                 return Err(Error::InvalidTicketCount);
             }
             if t < event.tickets_sold {
@@ -564,22 +622,30 @@ impl EventManager {
 
         let effective_end = end_date.unwrap_or(event.end_date);
         if let Some(s) = start_date {
-            if s < current_time {
+            if s <= current_time {
                 return Err(Error::InvalidStartDate);
             }
             if s >= effective_end {
                 return Err(Error::InvalidEndDate);
             }
+            Self::validate_event_span(s, effective_end)?;
+            Self::validate_start_not_too_far(s, current_time)?;
             event.start_date = s;
         }
 
         let effective_start = start_date.unwrap_or(event.start_date);
         if let Some(e) = end_date {
-            if e < current_time {
+            if e <= current_time {
                 return Err(Error::InvalidEndDate);
             }
             if e <= effective_start {
                 return Err(Error::InvalidEndDate);
+            }
+            // Max duration / far-future start only apply when the event start is still ahead;
+            // otherwise lengthening `end_date` for an in-progress event would falsely fail.
+            if effective_start > current_time {
+                Self::validate_event_span(effective_start, e)?;
+                Self::validate_start_not_too_far(effective_start, current_time)?;
             }
             event.end_date = e;
         }
@@ -648,8 +714,10 @@ impl EventManager {
 
         env.events().publish(
             (Symbol::new(&env, "funds_withdrawn"),),
-            (event_id, event.organizer, balance),
+            (event_id, event.organizer.clone(), balance),
         );
+
+        Self::decrement_organizer_open_events(&env, &event.organizer);
 
         // Promote the next person from the waitlist now that a slot is free
         Self::try_promote_from_waitlist(&env, event_id);
@@ -659,28 +727,103 @@ impl EventManager {
 
     // ========== Private helpers ==========
 
-    fn validate_event_params(
-        env: &Env,
-        start_date: u64,
-        end_date: u64,
-        ticket_price: i128,
-        total_tickets: u128,
-    ) -> Result<(), Error> {
-        let current_time = env.ledger().timestamp();
+    fn validate_bounded_string(s: &String, max_bytes: u32) -> Result<(), Error> {
+        if s.is_empty() || s.len() > max_bytes {
+            return Err(Error::InvalidStringInput);
+        }
+        Ok(())
+    }
 
-        if start_date <= current_time {
+    fn validate_ticket_price(price: i128) -> Result<(), Error> {
+        if price > Self::MAX_TICKET_PRICE {
+            return Err(Error::TicketPriceOutOfRange);
+        }
+        Ok(())
+    }
+
+    fn validate_create_schedule(env: &Env, start_date: u64, end_date: u64) -> Result<(), Error> {
+        let now = env.ledger().timestamp();
+        if start_date <= now {
             return Err(Error::InvalidStartDate);
         }
         if end_date <= start_date {
             return Err(Error::InvalidEndDate);
         }
-        if ticket_price < 0 {
-            return Err(Error::NegativeTicketPrice);
-        }
-        if total_tickets == 0 {
-            return Err(Error::InvalidTicketCount);
+        Self::validate_event_span(start_date, end_date)?;
+        Self::validate_start_not_too_far(start_date, now)?;
+        Ok(())
+    }
+
+    fn validate_event_span(start_date: u64, end_date: u64) -> Result<(), Error> {
+        let span = end_date.saturating_sub(start_date);
+        if span == 0 || span > Self::MAX_EVENT_DURATION_SECS {
+            return Err(Error::EventScheduleOutOfRange);
         }
         Ok(())
+    }
+
+    fn validate_start_not_too_far(start_date: u64, now: u64) -> Result<(), Error> {
+        let latest_start = now.saturating_add(Self::MAX_EVENT_START_AHEAD_SECS);
+        if start_date > latest_start {
+            return Err(Error::EventScheduleOutOfRange);
+        }
+        Ok(())
+    }
+
+    fn enforce_organizer_limits_and_rate(env: &Env, organizer: &Address) -> Result<(), Error> {
+        let count_key = DataKey::OrganizerOpenEventCount(organizer.clone());
+        let open_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0);
+        if open_count >= Self::MAX_ORGANIZER_OPEN_EVENTS {
+            return Err(Error::TooManyOrganizerEvents);
+        }
+
+        // Cooldown only while the organizer still holds at least one open slot, so cancel
+        // (or full withdrawal lifecycle) does not lock them out of creating a replacement event.
+        if open_count > 0 {
+            let ts_key = DataKey::OrganizerLastCreateTs(organizer.clone());
+            let now = env.ledger().timestamp();
+            if let Some(last) = env.storage().instance().get::<_, u64>(&ts_key) {
+                let earliest = last.saturating_add(Self::EVENT_CREATE_COOLDOWN_SECS);
+                if now < earliest {
+                    return Err(Error::EventCreationRateLimited);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn commit_organizer_create(env: &Env, organizer: &Address) {
+        let count_key = DataKey::OrganizerOpenEventCount(organizer.clone());
+        let open_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&count_key, &(open_count.saturating_add(1)));
+        Self::extend_persistent_ttl(env, &count_key);
+
+        let ts_key = DataKey::OrganizerLastCreateTs(organizer.clone());
+        env.storage()
+            .instance()
+            .set(&ts_key, &env.ledger().timestamp());
+        env.storage()
+            .instance()
+            .extend_ttl(Self::ttl_threshold(), Self::ttl_extend_to());
+    }
+
+    fn decrement_organizer_open_events(env: &Env, organizer: &Address) {
+        let count_key = DataKey::OrganizerOpenEventCount(organizer.clone());
+        let open_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&count_key, &open_count.saturating_sub(1));
+        Self::extend_persistent_ttl(env, &count_key);
+    }
+
+    fn try_promote_from_waitlist(_env: &Env, _event_id: u32) {
+        // Waitlist promotion hooks live alongside `join_waitlist` when enabled.
     }
 
     fn get_and_increment_counter(env: &Env) -> Result<u32, Error> {
@@ -809,3 +952,6 @@ impl EventManager {
         100 * 24 * 60 * 60 / 5
     }
 }
+
+#[cfg(test)]
+mod test;

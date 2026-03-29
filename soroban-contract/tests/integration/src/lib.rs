@@ -15,7 +15,7 @@ extern crate std;
 
 use soroban_sdk::{
     contract, contractimpl,
-    testutils::Address as _,
+    testutils::{Address as _, Ledger as _},
     vec, Address, BytesN, Env, IntoVal, String, Symbol, TryIntoVal, Val, Vec,
 };
 
@@ -375,6 +375,10 @@ fn test_factory_tracks_deployed_contracts() {
 
     // Each create_event deploys a new NFT contract via factory
     let id1 = create_event(&s, &organizer);
+    // Rate limit: second create for the same organizer needs a later ledger time
+    s.env
+        .ledger()
+        .set_timestamp(s.env.ledger().timestamp() + 200);
     let id2 = create_event(&s, &organizer);
 
     let event1 = s.event_client.get_event(&id1);
