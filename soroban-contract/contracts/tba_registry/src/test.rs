@@ -26,7 +26,9 @@ fn setup_test() -> (Env, TbaRegistryClient<'static>, BytesN<32>, Address) {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
-    let wasm_hash = env.deployer().upload_contract_wasm(tba_account_contract::WASM);
+    let wasm_hash = env
+        .deployer()
+        .upload_contract_wasm(tba_account_contract::WASM);
     let registry_address = env.register(TbaRegistry, (&admin, &wasm_hash));
     let client = TbaRegistryClient::new(&env, &registry_address);
     let nft_address = env.register(MockNFT, ());
@@ -64,9 +66,24 @@ fn test_multiple_accounts_same_nft() {
     let token_id = 42u128;
     let impl_hash = BytesN::from_array(&env, &[1u8; 32]);
 
-    let addr1 = client.create_account(&impl_hash, &nft_addr, &token_id, &BytesN::from_array(&env, &[10u8; 32]));
-    let addr2 = client.create_account(&impl_hash, &nft_addr, &token_id, &BytesN::from_array(&env, &[20u8; 32]));
-    let addr3 = client.create_account(&impl_hash, &nft_addr, &token_id, &BytesN::from_array(&env, &[30u8; 32]));
+    let addr1 = client.create_account(
+        &impl_hash,
+        &nft_addr,
+        &token_id,
+        &BytesN::from_array(&env, &[10u8; 32]),
+    );
+    let addr2 = client.create_account(
+        &impl_hash,
+        &nft_addr,
+        &token_id,
+        &BytesN::from_array(&env, &[20u8; 32]),
+    );
+    let addr3 = client.create_account(
+        &impl_hash,
+        &nft_addr,
+        &token_id,
+        &BytesN::from_array(&env, &[30u8; 32]),
+    );
 
     assert_ne!(addr1, addr2);
     assert_ne!(addr2, addr3);
@@ -106,9 +123,15 @@ fn test_get_deployed_address() {
     let impl_hash = BytesN::from_array(&env, &[1u8; 32]);
     let salt = BytesN::from_array(&env, &[70u8; 32]);
 
-    assert_eq!(client.get_deployed_address(&impl_hash, &nft_addr, &token_id, &salt), None);
+    assert_eq!(
+        client.get_deployed_address(&impl_hash, &nft_addr, &token_id, &salt),
+        None
+    );
     let deployed = client.create_account(&impl_hash, &nft_addr, &token_id, &salt);
-    assert_eq!(client.get_deployed_address(&impl_hash, &nft_addr, &token_id, &salt), Some(deployed));
+    assert_eq!(
+        client.get_deployed_address(&impl_hash, &nft_addr, &token_id, &salt),
+        Some(deployed)
+    );
 }
 
 #[test]
@@ -118,13 +141,28 @@ fn test_different_nfts_separate_counts() {
     let nft2 = env.register(MockNFT, ());
     let impl_hash = BytesN::from_array(&env, &[1u8; 32]);
 
-    client.create_account(&impl_hash, &nft1, &1u128, &BytesN::from_array(&env, &[80u8; 32]));
-    client.create_account(&impl_hash, &nft2, &1u128, &BytesN::from_array(&env, &[90u8; 32]));
+    client.create_account(
+        &impl_hash,
+        &nft1,
+        &1u128,
+        &BytesN::from_array(&env, &[80u8; 32]),
+    );
+    client.create_account(
+        &impl_hash,
+        &nft2,
+        &1u128,
+        &BytesN::from_array(&env, &[90u8; 32]),
+    );
 
     assert_eq!(client.total_deployed_accounts(&nft1, &1u128), 1);
     assert_eq!(client.total_deployed_accounts(&nft2, &1u128), 1);
 
-    client.create_account(&impl_hash, &nft1, &1u128, &BytesN::from_array(&env, &[100u8; 32]));
+    client.create_account(
+        &impl_hash,
+        &nft1,
+        &1u128,
+        &BytesN::from_array(&env, &[100u8; 32]),
+    );
     assert_eq!(client.total_deployed_accounts(&nft1, &1u128), 2);
     assert_eq!(client.total_deployed_accounts(&nft2, &1u128), 1);
 }

@@ -14,7 +14,9 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, IntoVal, Val, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, IntoVal, Val, Vec,
+};
 
 use upgradeable as upg;
 
@@ -83,7 +85,10 @@ impl TicketFactory {
     /// Requires admin authorization
     pub fn deploy_ticket(env: Env, minter: Address, salt: BytesN<32>) -> Result<Address, Error> {
         // Authorize: only admin can deploy
-        let admin: Address = env.storage().instance().get(&DataKey::Admin)
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
 
@@ -174,7 +179,10 @@ impl TicketFactory {
     /// # Returns
     /// The admin address
     pub fn get_admin(env: Env) -> Result<Address, Error> {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin)
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
 
         // Extend instance TTL on read

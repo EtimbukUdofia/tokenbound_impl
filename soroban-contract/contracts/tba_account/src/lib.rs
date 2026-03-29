@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    auth::Context, contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, IntoVal, Symbol,
-    Val, Vec,
+    auth::Context, contract, contracterror, contractimpl, contracttype, Address, BytesN, Env,
+    IntoVal, Symbol, Val, Vec,
 };
 
 use upgradeable as upg;
@@ -289,7 +289,7 @@ impl TbaAccount {
             Val::from(signatures),
             Val::from(auth_context),
         ]);
-        
+
         Ok(())
     }
 }

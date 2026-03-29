@@ -138,4 +138,3 @@ fn test_cannot_transfer_burned_token() {
     let result = client.try_transfer_from(&user1, &user2, &token_id);
     assert!(result.is_err());
 }
-

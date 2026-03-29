@@ -152,7 +152,7 @@ fn test_large_token_id_success() {
 
     // token_id larger than u64::MAX (2^64 - 1 = 18446744073709551615)
     // using 2^64
-    let token_id: u128 = 18446744073709551616; 
+    let token_id: u128 = 18446744073709551616;
     let owner = Address::generate(&env);
     nft_client.set_owner(&token_id, &owner);
 
@@ -175,7 +175,7 @@ fn test_large_token_id_success() {
     let val: u32 = result.get(0).unwrap().try_into_val(&env).unwrap();
     assert_eq!(val, 101u32);
     assert_eq!(client.nonce(), 1);
-    
+
     // Also verify owner() directly
     assert_eq!(client.owner(), owner);
 }

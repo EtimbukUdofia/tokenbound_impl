@@ -1,9 +1,8 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    contract, contractimpl,
-    testutils::Address as _,
-    vec, Address, BytesN, Env, IntoVal, Symbol, TryIntoVal, Val, Vec,
+    contract, contractimpl, testutils::Address as _, vec, Address, BytesN, Env, IntoVal, Symbol,
+    TryIntoVal, Val, Vec,
 };
 
 mod nft {

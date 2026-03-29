@@ -14,9 +14,8 @@ extern crate alloc;
 extern crate std;
 
 use soroban_sdk::{
-    contract, contractimpl,
-    testutils::Address as _,
-    vec, Address, BytesN, Env, IntoVal, String, Symbol, TryIntoVal, Val, Vec,
+    contract, contractimpl, testutils::Address as _, vec, Address, BytesN, Env, IntoVal, String,
+    Symbol, TryIntoVal, Val, Vec,
 };
 
 // ── WASM imports ──
@@ -169,7 +168,9 @@ fn test_full_happy_path_purchase_and_create_tba() {
     // Create TBA for the ticket (simulates POAP / badge account)
     let impl_hash = s.tba_wasm_hash.clone();
     let salt = BytesN::from_array(&s.env, &[1u8; 32]);
-    let tba_addr = s.registry_client.create_account(&impl_hash, &nft_addr, &token_id, &salt);
+    let tba_addr = s
+        .registry_client
+        .create_account(&impl_hash, &nft_addr, &token_id, &salt);
 
     let tba_client = tba_account::Client::new(&s.env, &tba_addr);
     assert_eq!(tba_client.token_contract(), nft_addr);
@@ -279,7 +280,9 @@ fn test_transfer_ticket_and_new_owner_creates_tba() {
     // New owner creates TBA
     let impl_hash = s.tba_wasm_hash.clone();
     let salt = BytesN::from_array(&s.env, &[2u8; 32]);
-    let tba_addr = s.registry_client.create_account(&impl_hash, &nft_addr, &token_id, &salt);
+    let tba_addr = s
+        .registry_client
+        .create_account(&impl_hash, &nft_addr, &token_id, &salt);
 
     let tba_client = tba_account::Client::new(&s.env, &tba_addr);
     assert_eq!(tba_client.owner(), recipient);
@@ -305,7 +308,9 @@ fn test_create_tba_and_execute_through_it() {
     // Create TBA
     let impl_hash = s.tba_wasm_hash.clone();
     let salt = BytesN::from_array(&s.env, &[3u8; 32]);
-    let tba_addr = s.registry_client.create_account(&impl_hash, &nft_addr, &token_id, &salt);
+    let tba_addr = s
+        .registry_client
+        .create_account(&impl_hash, &nft_addr, &token_id, &salt);
     let tba_client = tba_account::Client::new(&s.env, &tba_addr);
 
     assert_eq!(tba_client.nonce(), 0);
@@ -351,9 +356,11 @@ fn test_purchase_sold_out_event() {
         &s.payment_token,
     );
 
-    s.event_client.purchase_ticket(&Address::generate(&s.env), &event_id, &0u32);
+    s.event_client
+        .purchase_ticket(&Address::generate(&s.env), &event_id, &0u32);
     // Second purchase should fail
-    s.event_client.purchase_ticket(&Address::generate(&s.env), &event_id, &0u32);
+    s.event_client
+        .purchase_ticket(&Address::generate(&s.env), &event_id, &0u32);
 }
 
 #[test]
@@ -365,7 +372,8 @@ fn test_purchase_canceled_event_fails() {
     let event_id = create_event(&s, &organizer);
     s.event_client.cancel_event(&event_id);
 
-    s.event_client.purchase_ticket(&Address::generate(&s.env), &event_id, &0u32);
+    s.event_client
+        .purchase_ticket(&Address::generate(&s.env), &event_id, &0u32);
 }
 
 #[test]

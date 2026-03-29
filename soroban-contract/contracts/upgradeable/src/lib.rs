@@ -100,21 +100,24 @@ pub fn require_not_paused(env: &Env) {
 pub fn schedule_upgrade(env: &Env, new_wasm_hash: BytesN<32>) {
     require_admin(env);
     let scheduled_at = env.ledger().sequence();
-    env.storage()
-        .instance()
-        .set(&UpgradeKey::PendingUpgrade, &(new_wasm_hash.clone(), scheduled_at));
+    env.storage().instance().set(
+        &UpgradeKey::PendingUpgrade,
+        &(new_wasm_hash.clone(), scheduled_at),
+    );
     env.events().publish(
         (Symbol::new(env, "upgrade_scheduled"),),
-        (new_wasm_hash, scheduled_at, scheduled_at + UPGRADE_DELAY_LEDGERS),
+        (
+            new_wasm_hash,
+            scheduled_at,
+            scheduled_at + UPGRADE_DELAY_LEDGERS,
+        ),
     );
 }
 
 /// Cancel a pending upgrade. Admin only.
 pub fn cancel_upgrade(env: &Env) {
     require_admin(env);
-    env.storage()
-        .instance()
-        .remove(&UpgradeKey::PendingUpgrade);
+    env.storage().instance().remove(&UpgradeKey::PendingUpgrade);
     env.events()
         .publish((symbol_short!("upg_cncl"),), get_version(env));
 }
@@ -136,14 +139,13 @@ pub fn commit_upgrade(env: &Env) {
     );
 
     // Remove pending entry before upgrading (checks-effects-interactions)
-    env.storage()
-        .instance()
-        .remove(&UpgradeKey::PendingUpgrade);
+    env.storage().instance().remove(&UpgradeKey::PendingUpgrade);
 
     let old_version = get_version(env);
     let new_version = bump_version(env);
 
-    env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+    env.deployer()
+        .update_current_contract_wasm(new_wasm_hash.clone());
 
     env.events().publish(
         (Symbol::new(env, "upgraded"),),

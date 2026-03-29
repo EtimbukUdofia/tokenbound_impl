@@ -190,12 +190,8 @@ impl EventManager {
             .unwrap_or(params.ticket_price);
 
         let event_id = Self::get_and_increment_counter(&env)?;
-        let ticket_nft_addr = Self::deploy_ticket_nft(
-            &env,
-            event_id,
-            params.theme.clone(),
-            agg_total,
-        )?;
+        let ticket_nft_addr =
+            Self::deploy_ticket_nft(&env, event_id, params.theme.clone(), agg_total)?;
 
         let event = Event {
             id: event_id,
@@ -381,14 +377,11 @@ impl EventManager {
 
             // Deduct refunded amount from the escrowed balance
             let balance_key = DataKey::EventBalance(event_id);
-            let current_balance: i128 = env
-                .storage()
-                .persistent()
-                .get(&balance_key)
-                .unwrap_or(0);
-            env.storage()
-                .persistent()
-                .set(&balance_key, &current_balance.saturating_sub(purchase.total_paid));
+            let current_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+            env.storage().persistent().set(
+                &balance_key,
+                &current_balance.saturating_sub(purchase.total_paid),
+            );
         }
 
         env.events().publish(
@@ -408,7 +401,7 @@ impl EventManager {
         Self::purchase_tickets(env, buyer, event_id, tier_index, 1)
     }
 
-   pub fn purchase_tickets(
+    pub fn purchase_tickets(
         env: Env,
         buyer: Address,
         event_id: u32,
@@ -444,7 +437,7 @@ impl EventManager {
         }
 
         let mut tier = tiers.get(tier_index).unwrap();
-        
+
         if tier.sold_quantity + quantity > tier.total_quantity {
             return Err(Error::TierSoldOut);
         }
@@ -739,9 +732,7 @@ impl EventManager {
             .get(&DataKey::EventCounter)
             .unwrap_or(0);
 
-        let next = current
-            .checked_add(1)
-            .ok_or(Error::CounterOverflow)?;
+        let next = current.checked_add(1).ok_or(Error::CounterOverflow)?;
         env.storage().instance().set(&DataKey::EventCounter, &next);
         env.storage()
             .instance()
@@ -769,23 +760,13 @@ impl EventManager {
         let nft_addr: Address = env.invoke_contract(
             &factory_addr,
             &Symbol::new(env, "deploy_ticket"),
-            soroban_sdk::vec![
-                env,
-                env.current_contract_address().to_val(),
-                salt.to_val(),
-            ],
+            soroban_sdk::vec![env, env.current_contract_address().to_val(), salt.to_val(),],
         );
 
         Ok(nft_addr)
     }
 
-    fn record_purchase(
-        env: &Env,
-        event_id: u32,
-        buyer: Address,
-        quantity: u128,
-        total_paid: i128,
-    ) {
+    fn record_purchase(env: &Env, event_id: u32, buyer: Address, quantity: u128, total_paid: i128) {
         let key = DataKey::BuyerPurchase(event_id, buyer.clone());
         let existing = env.storage().persistent().get::<_, BuyerPurchase>(&key);
 
@@ -834,8 +815,8 @@ impl EventManager {
         if ticket_price <= 0 {
             return 0;
         }
-        let quantity_i128 = i128::try_from(quantity)
-            .unwrap_or_else(|_| panic!("Quantity exceeds pricing range"));
+        let quantity_i128 =
+            i128::try_from(quantity).unwrap_or_else(|_| panic!("Quantity exceeds pricing range"));
         let subtotal = ticket_price
             .checked_mul(quantity_i128)
             .unwrap_or_else(|| panic!("Price overflow"));
