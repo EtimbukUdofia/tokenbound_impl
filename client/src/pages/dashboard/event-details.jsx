@@ -229,6 +229,7 @@ const EventDetails = () => {
                             <img
                                 src="/assets/about-image-podcast.jpg"
                                 className="absolute inset-0 w-full h-[300px] object-cover "
+                                alt="Event banner background"
                             />
                             <div className="absolute inset-0 bg-black/50 z-10" />
                             <div className="relative z-20 h-full flex flex-col items-center justify-center px-4 sm:px-6 lg:px-8 text-center text-base-white">
