@@ -3,6 +3,7 @@ import Layout from '../../Components/dashboard/layout'
 import ExploreEventCard from '../../Components/dashboard/explore-event-card'
 import { mockEvents, categories, sortOptions } from '../../lib/mock-events'
 import { Search, SlidersHorizontal, ChevronLeft, ChevronRight, Calendar, DollarSign } from 'lucide-react'
+import SEO from '../../Components/shared/seo'
 
 const Discover = () => {
   const [searchQuery, setSearchQuery] = useState('')
@@ -72,6 +73,11 @@ const Discover = () => {
 
   return (
     <Layout>
+      <SEO 
+        title="Discover Events"
+        description="Explore upcoming Web3 events, workshops, and experiences on CrowdPass."
+        url="https://crowdpass.live/discover"
+      />
       <div className="space-y-6">
         {/* Page Header */}
         <div className="space-y-2">
